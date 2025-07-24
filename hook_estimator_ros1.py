@@ -71,11 +71,6 @@ class KNN(object):
         # Initialize the tf buffer and listener
         self.tf_listener = tf.TransformListener()
 
-
-
-
-
-
     def listener_callback_front(self, msg):
         cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
         self.cv_image_front = self.adjust_saturation(cv_image)
@@ -161,8 +156,7 @@ class KNN(object):
             tip_y = int((vertex_1[1] + vertex_2[1]) / 2)
             tip_rope = (tip_x, tip_y)
 
-            cv2.putText(preview_hook, f"{self.target_length:.2f} m", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+	    cv2.putText(preview_hook, "{:.2f} m".format(self.target_length), (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
             return tip_rope
 
@@ -178,7 +172,6 @@ class KNN(object):
         Computes and stores translation and rotation matrices between all relevant frames.
         Results are stored as self.A_pos_in_B_frame and self.A_rot_in_B_frame.
         """
-
         frame_list = [
             'base_link',
             'camera1_link',
@@ -188,7 +181,8 @@ class KNN(object):
         ]
 
         # Prefix for frames (adjust as needed)
-        full_frames = {name: f'{name}' for name in frame_list}
+        #full_frames = {name: f'{name}' for name in frame_list}
+	full_frames = {name: '{}'.format(name) for name in frame_list}
 
         now = rospy.Time.now()
 
@@ -211,15 +205,20 @@ class KNN(object):
                     rot = Rotation.from_quat([rot_quat[0], rot_quat[1], rot_quat[2], rot_quat[3]]).as_matrix()
 
                     # Save with dynamic attribute naming
-                    pos_attr = f"{A_name}_pos_in_{B_name}_frame"
-                    rot_attr = f"{A_name}_rot_in_{B_name}_frame"
+                    #pos_attr = f"{A_name}_pos_in_{B_name}_frame"
+		    pos_attr = "{}_pos_in_{}_frame".format(A_name, B_name)
+                    #rot_attr = f"{A_name}_rot_in_{B_name}_frame"
+		    rot_attr = "{}_rot_in_{}_frame".format(A_name, B_name)
                     setattr(self, pos_attr, pos)
                     setattr(self, rot_attr, rot)
 
                 except (tf.Exception, tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e:
-                    rospy.logwarn(f"TF lookup failed for {A_frame} -> {B_frame}: {e}")
-                    pos_attr = f"{A_name}_pos_in_{B_name}_frame"
-                    rot_attr = f"{A_name}_rot_in_{B_name}_frame"
+                    #rospy.logwarn(f"TF lookup failed for {A_frame} -> {B_frame}: {e}")
+	            rospy.logwarn("TF lookup failed for {} -> {}: {}".format(A_frame, B_frame, e))
+                    #pos_attr = f"{A_name}_pos_in_{B_name}_frame"
+		    pos_attr = "{}_pos_in_{}_frame".format(A_name, B_name)
+                    #rot_attr = f"{A_name}_rot_in_{B_name}_frame"
+		    rot_attr = "{}_rot_in_{}_frame".format(A_name, B_name)
                     setattr(self, pos_attr, None)
                     setattr(self, rot_attr, None)
 
@@ -245,7 +244,9 @@ class KNN(object):
                 pos_front = self.reconstruct_hook_position(p_img, K, R_front, T_front, self.target_length)
                 hook_positions.append(pos_front)
             except Exception as e:
-                rospy.logwarn(f"[Front camera] Hook reconstruction failed: {e}")
+                #rospy.logwarn(f"[Front camera] Hook reconstruction failed: {e}")
+		rospy.logwarn("[Front camera] Hook reconstruction failed: {}".format(e))
+
 
         # === REAR CAMERA ===
         if tip_rear_cam is not None:
@@ -261,7 +262,8 @@ class KNN(object):
                 pos_rear = self.reconstruct_hook_position(p_img, K, R_rear, T_rear, self.target_length)
                 hook_positions.append(pos_rear)
             except Exception as e:
-                rospy.logwarn(f"[Rear camera] Hook reconstruction failed: {e}")
+                #rospy.logwarn(f"[Rear camera] Hook reconstruction failed: {e}")
+		rospy.logwarn("[Front camera] Hook reconstruction failed: {}".format(e))
 
         # === DECIDE FINAL POSITION ===
         if len(hook_positions) == 0:
@@ -300,7 +302,8 @@ class KNN(object):
         isinstance(self.est_Hook_pos_in_base_link_frame, np.ndarray) and \
         self.est_Hook_pos_in_base_link_frame.shape == (3,):
             pos = self.est_Hook_pos_in_base_link_frame
-            pos_text = f"Position (base_link): ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
+            #pos_text = f"Position (base_link): ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
+	    pos_text = "Position (base_link): ({:.2f}, {:.2f}, {:.2f})".format(pos[0], pos[1], pos[2])
         else:
             pos_text = "Position (base_link): N/A"
 
@@ -405,9 +408,11 @@ class KNN(object):
                             self.ekf_initialized = True
                             rospy.loginfo("EKF initialized with first hook position.")
                         else:
-                            rospy.logwarn(f"Invalid hook position shape during EKF init: {pos.shape}")
+                            #rospy.logwarn(f"Invalid hook position shape during EKF init: {pos.shape}")
+			    rospy.logwarn("Invalid hook position shape during EKF init: {}".format(pos.shape))
                     except Exception as e:
-                        rospy.logwarn(f"EKF initialization failed: {e}")
+                        #rospy.logwarn(f"EKF initialization failed: {e}")
+			rospy.logwarn("EKF initialization failed: {}".format(e))
 
                 # ======= Timestamp collection (safe) =======
                 avg_stamp_sec = None
@@ -424,7 +429,8 @@ class KNN(object):
                     else:
                         rospy.logwarn("Front or rear stamp missing; cannot append timestamp.")
                 except Exception as e:
-                    rospy.logwarn(f"Timestamp computation failed: {e}")
+                    #rospy.logwarn(f"Timestamp computation failed: {e}")
+		    rospy.logwarn("Timestamp computation failed: {}".format(e))
 
                 # ======= EKF Update (if enough data and valid) =======
                 if (
@@ -447,7 +453,8 @@ class KNN(object):
                                 meas = np.array(self.est_Hook_pos_in_winch_frame_ekf, dtype=float).reshape(3, 1)
                                 self.update_ekf_constrained(meas, a_drone, dt)
                         except Exception as e:
-                            rospy.logwarn(f"EKF update failed: {e}")
+                            #rospy.logwarn(f"EKF update failed: {e}")
+			    rospy.logwarn("EKF update failed: {}".format(e))
                             self.ekf_Hook_pos_in_winch_frame = np.array([np.nan, np.nan, np.nan])
                     else:
                         rospy.logwarn("Timestamps are None; skipping EKF update.")
@@ -475,7 +482,8 @@ class KNN(object):
                     rospy.logwarn("Missing winch_link -> base_link transform for hook position.")
 
             except Exception as e:
-                rospy.logwarn(f"Error transforming hook position: {e}")
+                #rospy.logwarn(f"Error transforming hook position: {e}")
+		rospy.logwarn("Error transforming hook position: {}".format(e))
                 self.est_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
                 self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
 
@@ -493,11 +501,6 @@ class KNN(object):
             self.draw_hook_info(self.cv_image_front, tip_front, 'Front Camera Hook Detection')
         if self.cv_image_rear is not None:
             self.draw_hook_info(self.cv_image_rear, tip_rear, 'Rear Camera Hook Detection')
-
-    
-    
-
-
     def imu_callback(self, msg: Imu):
         self.a_drone = np.array([
             msg.linear_acceleration.x,
@@ -620,9 +623,6 @@ class KNN(object):
         self.ekf_Hook_pos_in_winch_frame = self.ekf.x[0:3].copy()
     #"""
 
-
-
-
     def _align_arrays(self, *arrays):
         """
         Filters and aligns arrays to have the same valid length, padding shorter arrays with NaN values.
@@ -663,11 +663,11 @@ class KNN(object):
                 estimated=np.array(self.est_Hook_pos_in_base_link_frame_to_plot),
                 ekf=np.array(self.ekf_Hook_pos_in_base_link_frame_to_plot)
             )
-            rospy.loginfo(f"Saved plot data to: {filename}")
+            #rospy.loginfo(f"Saved plot data to: {filename}")
+	    rospy.loginfo("Saved plot data to: {}".format(filename))
         except Exception as e:
-            rospy.logerr(f"Failed to save plot data: {e}")
-
-
+            #rospy.logerr(f"Failed to save plot data: {e}")
+            rospy.logerr("Failed to save plot data: {}".format(e))
 
 def main(args=None):
     rospy.init_node('k_nearest_neighbors')
