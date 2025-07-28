@@ -9,12 +9,12 @@ from collections import deque
 import tf
 from tf import TransformListener
 from filterpy.kalman import ExtendedKalmanFilter
-import auv_detector.params_detector_2 as P
+#import auv_detector.params_detector_2 as P
 from scipy.spatial.transform import Rotation
 from datetime import datetime
-import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.use('Agg')
+#import matplotlib.pyplot as plt
+#import matplotlib
+#matplotlib.use('Agg')
 import os
 import csv
 from itertools import groupby
@@ -148,7 +148,7 @@ class KNN(object):
                 rospy.logwarn("Hook tip detected on image edge, skipping hook position computation.")
                 cv2.putText(preview_hook, "Hook tip on edge", (10, 80),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                self.est_hook_pos_in_base_link_frame_to_plot.append([np.nan, np.nan, np.nan])
+                self.est_Hook_pos_in_base_link_frame_to_plot.append([np.nan, np.nan, np.nan])
                 return None
 
             # Compute hook tip position
@@ -164,7 +164,7 @@ class KNN(object):
             rospy.logwarn("No hook contour found, skipping hook position computation.")
             cv2.putText(preview_hook, "Hook not found", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            self.est_hook_pos_in_base_link_frame_to_plot.append([np.nan, np.nan, np.nan])
+            self.est_Hook_pos_in_base_link_frame_to_plot.append([np.nan, np.nan, np.nan])
             return None
 
     def update_transforms(self):
@@ -330,15 +330,21 @@ class KNN(object):
         p_img_hom = np.array([p_img[0], p_img[1], 1.0])
 
         # Compute direction of the ray in camera coordinates
-        ray_dir_cam = np.linalg.inv(K) @ p_img_hom
-        ray_dir_cam = np.array([
-                [0, 0, 1],
-                [0, 1, 0],
-                [1, 0, 0]
-            ]) @ ray_dir_cam  # Assuming the camera is rotated to align with winch coordinates
+        #ray_dir_cam = np.linalg.inv(K) @ p_img_hom
+	ray_dir_cam = np.dot(np.linalg.inv(K), p_img_hom)
+
+        # Assuming the camera is rotated to align with winch coordinates
+	ray_dir_cam = np.dot(np.array([
+	    [0, 0, 1],
+	    [0, 1, 0],
+	    [1, 0, 0]
+	]), ray_dir_cam)
+
 
         # Convert ray direction to winch coordinates
-        ray_dir_world = R @ ray_dir_cam
+        #ray_dir_world = R @ ray_dir_cam
+	ray_dir_world = np.dot(R, ray_dir_cam)
+
 
         # Camera center in winch coordinates
         C = T
@@ -392,11 +398,12 @@ class KNN(object):
 
         # Step 4: Transform hook position from winch frame to base_link frame if available
         if self.est_Hook_pos_in_winch_frame is not None:
-            self.est_Hook_pos_in_winch_frame_ekf = np.array([
-                                                    [0, 1, 0],
-                                                    [-1, 0, 0],
-                                                    [0, 0, 1]
-                                                ]) @ self.est_Hook_pos_in_winch_frame
+	    self.est_Hook_pos_in_winch_frame_ekf = np.dot(np.array([
+						    [0, 1, 0],
+						    [-1, 0, 0],
+						    [0, 0, 1]
+						]), self.est_Hook_pos_in_winch_frame)
+
             try:
                 # ======= EKF Initialization (once) =======
                 if not self.ekf_initialized:
@@ -408,10 +415,8 @@ class KNN(object):
                             self.ekf_initialized = True
                             rospy.loginfo("EKF initialized with first hook position.")
                         else:
-                            #rospy.logwarn(f"Invalid hook position shape during EKF init: {pos.shape}")
 			    rospy.logwarn("Invalid hook position shape during EKF init: {}".format(pos.shape))
                     except Exception as e:
-                        #rospy.logwarn(f"EKF initialization failed: {e}")
 			rospy.logwarn("EKF initialization failed: {}".format(e))
 
                 # ======= Timestamp collection (safe) =======
@@ -429,7 +434,6 @@ class KNN(object):
                     else:
                         rospy.logwarn("Front or rear stamp missing; cannot append timestamp.")
                 except Exception as e:
-                    #rospy.logwarn(f"Timestamp computation failed: {e}")
 		    rospy.logwarn("Timestamp computation failed: {}".format(e))
 
                 # ======= EKF Update (if enough data and valid) =======
@@ -453,7 +457,6 @@ class KNN(object):
                                 meas = np.array(self.est_Hook_pos_in_winch_frame_ekf, dtype=float).reshape(3, 1)
                                 self.update_ekf_constrained(meas, a_drone, dt)
                         except Exception as e:
-                            #rospy.logwarn(f"EKF update failed: {e}")
 			    rospy.logwarn("EKF update failed: {}".format(e))
                             self.ekf_Hook_pos_in_winch_frame = np.array([np.nan, np.nan, np.nan])
                     else:
@@ -467,14 +470,17 @@ class KNN(object):
                 pos_winch_in_base = getattr(self, "winch_link_pos_in_base_link_frame", None)
 
                 if rot_winch_in_base is not None and pos_winch_in_base is not None:
-                    self.est_Hook_pos_in_base_link_frame = rot_winch_in_base @ pos_winch + pos_winch_in_base
-                    self.est_Hook_pos_in_base_link_frame = np.array([
-                                                                    [0, 1, 0],
-                                                                    [-1, 0, 0],
-                                                                    [0, 0, 1]
-                                                                ]) @ self.est_Hook_pos_in_base_link_frame
+                    #self.est_Hook_pos_in_base_link_frame = rot_winch_in_base @ pos_winch + pos_winch_in_base
+		    self.est_Hook_pos_in_base_link_frame = np.dot(rot_winch_in_base, pos_winch) + pos_winch_in_base
+
+		    self.est_Hook_pos_in_base_link_frame = np.dot(np.array([
+								    [0, 1, 0],
+								    [-1, 0, 0],
+								    [0, 0, 1]
+								]), self.est_Hook_pos_in_base_link_frame)
                     if not np.isnan(self.ekf_Hook_pos_in_winch_frame).any():
-                        self.ekf_Hook_pos_in_base_link_frame = rot_winch_in_base @ self.ekf_Hook_pos_in_winch_frame + pos_winch_in_base
+                        #self.ekf_Hook_pos_in_base_link_frame = rot_winch_in_base @ self.ekf_Hook_pos_in_winch_frame + pos_winch_in_base
+			self.ekf_Hook_pos_in_base_link_frame = np.dot(rot_winch_in_base, self.ekf_Hook_pos_in_winch_frame) + pos_winch_in_base
                     else:
                         self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
                 else:
@@ -482,7 +488,6 @@ class KNN(object):
                     rospy.logwarn("Missing winch_link -> base_link transform for hook position.")
 
             except Exception as e:
-                #rospy.logwarn(f"Error transforming hook position: {e}")
 		rospy.logwarn("Error transforming hook position: {}".format(e))
                 self.est_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
                 self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
@@ -501,7 +506,8 @@ class KNN(object):
             self.draw_hook_info(self.cv_image_front, tip_front, 'Front Camera Hook Detection')
         if self.cv_image_rear is not None:
             self.draw_hook_info(self.cv_image_rear, tip_rear, 'Rear Camera Hook Detection')
-    def imu_callback(self, msg: Imu):
+    #def imu_callback(self, msg: Imu):
+    def imu_callback(self, msg):
         self.a_drone = np.array([
             msg.linear_acceleration.x,
             msg.linear_acceleration.y,
@@ -512,7 +518,8 @@ class KNN(object):
         # Check if the rotation matrix exists and is valid
         rot = getattr(self, "imu_link_rot_in_odom_frame", None)
         if rot is not None:
-            self.a_drone_odom = rot @ self.a_drone  # matrix multiply rotation * vector
+            #self.a_drone_odom = rot @ self.a_drone  # matrix multiply rotation * vector
+	    self.a_drone_odom = np.dot(rot, self.a_drone)
         else:
             rospy.logwarn("Rotation matrix imu_link_rot_in_odom_frame not available")
             self.a_drone_odom = None
@@ -545,8 +552,10 @@ class KNN(object):
 
         # Project block-wise
         P_proj = P.copy()
-        P_proj[0:3, 0:3] = T @ P[0:3, 0:3] @ T.T
-        P_proj[0:3, 3:6] = T @ P[0:3, 3:6]
+        #P_proj[0:3, 0:3] = T @ P[0:3, 0:3] @ T.T
+        #P_proj[0:3, 3:6] = T @ P[0:3, 3:6]
+	P_proj[0:3, 0:3] = np.dot(np.dot(T, P[0:3, 0:3]), T.T)
+	P_proj[0:3, 3:6] = np.dot(T, P[0:3, 3:6])
         P_proj[3:6, 0:3] = P_proj[0:3, 3:6].T
         P_proj[3:6, 3:6] = P[3:6, 3:6]  # Leave velocity covariance as is
 
@@ -599,7 +608,9 @@ class KNN(object):
         # ===== EKF PREDICTION =====
         self.ekf.F = self.F_jacobian(self.ekf.x, dt, a_drone)
         self.ekf.x = self.fx(self.ekf.x, dt, a_drone)
-        self.ekf.P = self.ekf.F @ self.ekf.P @ self.ekf.F.T + self.ekf.Q
+        #self.ekf.P = self.ekf.F @ self.ekf.P @ self.ekf.F.T + self.ekf.Q
+	self.ekf.P = np.dot(np.dot(self.ekf.F, self.ekf.P), self.ekf.F.T) + self.ekf.Q
+
 
         # ===== PROJECT TO SPHERE (optional but recommended) =====
         self.ekf.x = self.project_to_sphere(self.ekf.x, self.target_length)
@@ -610,10 +621,16 @@ class KNN(object):
         z = z_meas_pos.flatten()
         hx = self.hx(self.ekf.x).flatten()
         y = z - hx
-        S = H @ self.ekf.P @ H.T + self.ekf.R
-        K = self.ekf.P @ H.T @ np.linalg.inv(S)
-        self.ekf.x = self.ekf.x + K @ y
-        self.ekf.P = (np.eye(6) - K @ H) @ self.ekf.P
+        
+	#S = H @ self.ekf.P @ H.T + self.ekf.R
+        #K = self.ekf.P @ H.T @ np.linalg.inv(S)
+        #self.ekf.x = self.ekf.x + K @ y
+        #self.ekf.P = (np.eye(6) - K @ H) @ self.ekf.P
+
+	S = np.dot(np.dot(H, self.ekf.P), H.T) + self.ekf.R
+	K = np.dot(np.dot(self.ekf.P, H.T), np.linalg.inv(S))
+	self.ekf.x = self.ekf.x + np.dot(K, y)
+	self.ekf.P = np.dot(np.eye(6) - np.dot(K, H), self.ekf.P)
 
         # ===== PROJECT AGAIN (after update) =====
         self.ekf.x = self.project_to_sphere(self.ekf.x, self.target_length)
@@ -654,7 +671,9 @@ class KNN(object):
     def save_plot_data(self, save_dir='plot_data'):
         os.makedirs(save_dir, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = os.path.join(save_dir, f'hook_base_link_{timestamp}.npz')
+        #filename = os.path.join(save_dir, f'hook_base_link_{timestamp}.npz')
+	filename = os.path.join(save_dir, 'hook_base_link_{}.npz'.format(timestamp))
+
 
         try:
             np.savez(
@@ -663,10 +682,8 @@ class KNN(object):
                 estimated=np.array(self.est_Hook_pos_in_base_link_frame_to_plot),
                 ekf=np.array(self.ekf_Hook_pos_in_base_link_frame_to_plot)
             )
-            #rospy.loginfo(f"Saved plot data to: {filename}")
 	    rospy.loginfo("Saved plot data to: {}".format(filename))
         except Exception as e:
-            #rospy.logerr(f"Failed to save plot data: {e}")
             rospy.logerr("Failed to save plot data: {}".format(e))
 
 def main(args=None):
