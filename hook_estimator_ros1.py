@@ -202,7 +202,7 @@ class KNN(object):
                     pos = np.array(trans)
 
                     # Convert quaternion to rotation matrix
-                    rot = Rotation.from_quat([rot_quat[0], rot_quat[1], rot_quat[2], rot_quat[3]]).as_matrix()
+                    rot = Rotation.from_quat([rot_quat[0], rot_quat[1], rot_quat[2], rot_quat[3]]).as_dcm()
 
                     # Save with dynamic attribute naming
                     #pos_attr = f"{A_name}_pos_in_{B_name}_frame"
