@@ -9,12 +9,8 @@ from collections import deque
 import tf
 from tf import TransformListener
 from filterpy.kalman import ExtendedKalmanFilter
-#import auv_detector.params_detector_2 as P
 from scipy.spatial.transform import Rotation
 from datetime import datetime
-#import matplotlib.pyplot as plt
-#import matplotlib
-#matplotlib.use('Agg')
 import os
 import csv
 from itertools import groupby
@@ -109,6 +105,9 @@ class KNN(object):
         upper_yellow = np.array([70, 240, 255])
         hsv_thresh_hook = cv2.inRange(imghsv, lower_yellow, upper_yellow)
         preview_hook = cv2.bitwise_and(cv_image, cv_image, mask=hsv_thresh_hook)
+
+        cv2.imshow("hsv detector", preview_hook)
+        cv2.waitKey(1)
 
         # Find contours
         contours, _ = cv2.findContours(hsv_thresh_hook, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -516,12 +515,12 @@ class KNN(object):
 
         # Rotate acceleration vector from IMU frame to odom frame
         # Check if the rotation matrix exists and is valid
-        rot = getattr(self, "imu_link_rot_in_odom_frame", None)
+        rot = getattr(self, "imu_link_rot_in_base_link_frame", None)
         if rot is not None:
             #self.a_drone_odom = rot @ self.a_drone  # matrix multiply rotation * vector
 	    self.a_drone_odom = np.dot(rot, self.a_drone)
         else:
-            rospy.logwarn("Rotation matrix imu_link_rot_in_odom_frame not available")
+            rospy.logwarn("Rotation matrix imu_link_rot_in_base_link_frame not available")
             self.a_drone_odom = None
 
     def project_to_sphere(self, x, L):
