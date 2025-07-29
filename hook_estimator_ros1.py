@@ -36,6 +36,7 @@ class KNN(object):
         self.cv_image_rear = None
         self.front_stamp = None
         self.rear_stamp = None
+	self.gb_cv_image_hough = None
 
         self.hook_timer = rospy.Timer(rospy.Duration(0.1), self.process_hook_estimation)
 
@@ -162,7 +163,7 @@ class KNN(object):
         cv_image_original = cv_image.copy()
         imghsv = cv2.cvtColor(cv_image_original, cv2.COLOR_BGR2HSV)
 
-        cv2.imshow("HSV imghsv original", cv_image_original)
+        #cv2.imshow("HSV imghsv original", cv_image_original)
 
         # HSV range for hook detection (adjust as needed)
         lower_red = np.array([0, 180, 100])
@@ -214,13 +215,15 @@ class KNN(object):
 
             # Hough Transform
             lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50, minLineLength=10, maxLineGap=10)
-            print(f"Detected lines: {len(lines) if lines is not None else 0}")
+	    print("Detected lines: {}".format(len(lines) if lines is not None else 0))
+
             filtered_lines = self.filter_similar_lines_by_position_and_angle(lines, position_thresh=20, angle_thresh=5)
 
             # Compute line lengths if lines are detected
             if filtered_lines is not None:
                 line_lengths = [np.linalg.norm(np.array([x1, y1]) - np.array([x2, y2])) for x1, y1, x2, y2 in filtered_lines]
-                print(f"Line lengths: {line_lengths}")
+		print("Line lengths: {}".format(line_lengths))
+
 
             # Draw the lines
             cv_image_hough = cv_image.copy()
@@ -418,8 +421,8 @@ class KNN(object):
             self.front_camera_sees_hook.append(True)
             try:
                 p_img = np.array(tip_front_cam)
-                R_front = self.camera_link_rot_in_winch_link_frame
-                T_front = self.camera_link_pos_in_winch_link_frame
+                R_front = self.camera1_link_rot_in_winch_link_frame
+                T_front = self.camera1_link_pos_in_winch_link_frame
                 pos_front = self.reconstruct_hook_position(p_img, K, R_front, T_front, self.target_length)
                 hook_positions.append(pos_front)
             except Exception as e:
@@ -433,8 +436,8 @@ class KNN(object):
             self.rear_camera_sees_hook.append(True)
             try:
                 p_img = np.array(tip_rear_cam)
-                R_rear = self.camera_link_2_rot_in_winch_link_frame
-                T_rear = self.camera_link_2_pos_in_winch_link_frame
+                R_rear = self.camera2_link_rot_in_winch_link_frame
+                T_rear = self.camera2_link_pos_in_winch_link_frame
                 pos_rear = self.reconstruct_hook_position(p_img, K, R_rear, T_rear, self.target_length)
                 hook_positions.append(pos_rear)
             except Exception as e:
@@ -652,38 +655,34 @@ class KNN(object):
             self.ekf_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
 
         if self.est_Hook_pos_in_winch_frame is not None and not np.isnan(self.est_Hook_pos_in_winch_frame).any() and rot_winch_in_base is not None and pos_winch_in_base is not None:
-            self.est_Hook_pos_in_base_link_frame = rot_winch_in_base @ pos_winch + pos_winch_in_base
-            self.est_Hook_pos_in_base_link_frame = np.array([
+            #self.est_Hook_pos_in_base_link_frame = rot_winch_in_base @ pos_winch + pos_winch_in_base
+	    self.est_Hook_pos_in_base_link_frame = np.dot(rot_winch_in_base, pos_winch) + pos_winch_in_base
+
+            self.est_Hook_pos_in_base_link_frame = np.dot( np.array([
                                                             [0, 1, 0],
                                                             [-1, 0, 0],
                                                             [0, 0, 1]
-                                                        ]) @ self.est_Hook_pos_in_base_link_frame
+                                                        ]), self.est_Hook_pos_in_base_link_frame)
         else:
             self.est_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
 
                 
         if not np.isnan(self.ekf_Hook_pos_in_winch_frame).any() and rot_winch_in_base is not None and pos_winch_in_base is not None:
-            self.ekf_Hook_pos_in_base_link_frame = rot_winch_in_base @ self.ekf_Hook_pos_in_winch_frame + pos_winch_in_base
+            self.ekf_Hook_pos_in_base_link_frame = np.dot(rot_winch_in_base, self.ekf_Hook_pos_in_winch_frame) + pos_winch_in_base
         else:
             self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
 
         if self.est_Hook_pos_in_base_link_frame is not None and not np.isnan(self.est_Hook_pos_in_base_link_frame).any() and rot_base_in_odom is not None and pos_base_in_odom is not None:
-            self.est_Hook_pos_in_odom_frame = rot_base_in_odom @ self.est_Hook_pos_in_base_link_frame + pos_base_in_odom
+            self.est_Hook_pos_in_odom_frame = np.dot(rot_base_in_odom, self.est_Hook_pos_in_base_link_frame) + pos_base_in_odom
         else:
             self.est_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
         
         if not np.isnan(self.ekf_Hook_pos_in_winch_frame).any() and rot_base_in_odom is not None and pos_base_in_odom is not None:
-            self.ekf_Hook_pos_in_odom_frame = rot_base_in_odom @ self.ekf_Hook_pos_in_base_link_frame + pos_base_in_odom
+            self.ekf_Hook_pos_in_odom_frame = np.dot(rot_base_in_odom, self.ekf_Hook_pos_in_base_link_frame) + pos_base_in_odom
         else:
             self.ekf_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
 
         # Step 5: Save positions for plotting
-        if self.Hook_pos_in_base_link_frame is None:
-            self.Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
-        if self.Hook_pos_in_odom_frame is None:
-            self.Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
-        self.Hook_pos_in_base_link_frame_to_plot.append(list(self.Hook_pos_in_base_link_frame))
-        self.Hook_pos_in_odom_frame_to_plot.append(list(self.Hook_pos_in_odom_frame))
         self.est_Hook_pos_in_base_link_frame_to_plot.append(list(self.est_Hook_pos_in_base_link_frame))
         self.est_Hook_pos_in_odom_frame_to_plot.append(list(self.est_Hook_pos_in_odom_frame))
         self.ekf_Hook_pos_in_base_link_frame_to_plot.append(list(self.ekf_Hook_pos_in_base_link_frame))
@@ -721,7 +720,7 @@ class KNN(object):
         x = np.asarray(x).flatten()
         p = x[0:3]
         v = x[3:6]
-        a_eff = self.g_vec - a_drone
+        a_eff = a_drone
 
         # Remove radial component of acceleration to stay on sphere
         acc = a_eff - np.dot(a_eff, p) / (np.linalg.norm(p)**2 + 1e-6) * p
@@ -770,12 +769,14 @@ class KNN(object):
         return P_proj
 
     # -------------------------------
-    # ✅ Prediction Only
+    #  Prediction Only
     # -------------------------------
     def predict_ekf(self, dt, a_drone):
         self.ekf.F = self.jacobian_F(self.ekf.x, dt, a_drone)
         self.ekf.x = self.fx(self.ekf.x, dt, a_drone)
-        self.ekf.P = self.ekf.F @ self.ekf.P @ self.ekf.F.T + self.ekf.Q
+        #self.ekf.P = self.ekf.F @ self.ekf.P @ self.ekf.F.T + self.ekf.Q
+	self.ekf.P = np.dot(np.dot(self.ekf.F, self.ekf.P), self.ekf.F.T) + self.ekf.Q
+
 
         self.ekf_Hook_pos_in_winch_frame = self.ekf.x[0:3].copy()
 
@@ -788,7 +789,7 @@ class KNN(object):
         print("self.ekf_Hook_pos_in_winch_frame:", self.ekf_Hook_pos_in_winch_frame)
 
     # -------------------------------
-    # ✅ Predict + Update (with measurement)
+    #  Predict + Update (with measurement)
     # -------------------------------
     def update_ekf(self, dt, a_drone, measurement):
         self.predict_ekf(dt, a_drone)
@@ -797,17 +798,16 @@ class KNN(object):
         z = measurement.flatten()
         hx = self.hx(self.ekf.x).flatten()
         y = z - hx
-        S = H @ self.ekf.P @ H.T + self.ekf.R
-        K = self.ekf.P @ H.T @ np.linalg.inv(S)
-        self.ekf.x = self.ekf.x + K @ y
-        self.ekf.P = (np.eye(6) - K @ H) @ self.ekf.P
+        S = np.dot(np.dot(H , self.ekf.P) , H.T) + self.ekf.R
+        K = np.dot(np.dot(self.ekf.P , H.T) , np.linalg.inv(S))
+        self.ekf.x = self.ekf.x + np.dot(K, y)
+        self.ekf.P = np.dot((np.eye(6) - np.dot(K , H)) , self.ekf.P)
 
 
     def update_ekf_constrained(self, z_meas_pos, a_drone, dt):
         # ===== EKF PREDICTION =====
         self.ekf.F = self.F_jacobian(self.ekf.x, dt, a_drone)
         self.ekf.x = self.fx(self.ekf.x, dt, a_drone)
-        #self.ekf.P = self.ekf.F @ self.ekf.P @ self.ekf.F.T + self.ekf.Q
 	self.ekf.P = np.dot(np.dot(self.ekf.F, self.ekf.P), self.ekf.F.T) + self.ekf.Q
         self.ekf_Hook_pos_in_winch_frame = self.ekf.x[0:3].copy()
 
@@ -820,10 +820,6 @@ class KNN(object):
         hx = self.hx(self.ekf.x).flatten()
         y = z - hx
         
-	#S = H @ self.ekf.P @ H.T + self.ekf.R
-        #K = self.ekf.P @ H.T @ np.linalg.inv(S)
-        #self.ekf.x = self.ekf.x + K @ y
-        #self.ekf.P = (np.eye(6) - K @ H) @ self.ekf.P
 
 	S = np.dot(np.dot(H, self.ekf.P), H.T) + self.ekf.R
 	K = np.dot(np.dot(self.ekf.P, H.T), np.linalg.inv(S))
