@@ -3,15 +3,15 @@ import matplotlib.pyplot as plt
 import os
 import sys
 
-def plot_npz_file(filename1, filename2):
+def plot_npz_file(filename1): #plot_npz_file(filename1, filename2):
     data1 = np.load(filename1)
-    data2 = np.load(filename2)
+    # data2 = np.load(filename2)
     t = data1['timestamps']
     est = data1['estimated']
     ekf = data1['ekf']
     seen_front = data1['seen_front_f']
-    seen_rear = data1['seen_back_f']
-    gt = data2['gt']
+    seen_rear = data1['seen_rear_f']
+    # gt = data2['gt']
 
     t = t - t[0]  # start at 0
 
@@ -21,8 +21,10 @@ def plot_npz_file(filename1, filename2):
         ax = plt.subplot(4, 1, i + 1)
         ax.plot(t, est[:, i], 'r--', label='Estimated' if i == 0 else "")
         ax.plot(t, ekf[:, i], 'g:', label='EKF' if i == 0 else "")
-        ax.plot(t, gt[:, i], 'b-', label='Ground Truth' if i == 0 else "")
-        ax.ylabel(f'{label} [m]')
+        #ax.plot(t, gt[:, i], 'b-', label='Ground Truth' if i == 0 else "")
+        #ax.ylabel(f'{label} [m]')
+	ax.set_ylabel('{} [m]'.format(label))
+	
         ax.grid(True)
         if i == 0:
             ax.legend(loc='upper right')
@@ -42,8 +44,8 @@ def plot_npz_file(filename1, filename2):
     plt.show()
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print("Usage: python plot_hook_base_link.py <path_to_npz_file>")
-        sys.exit(1)
+    # if len(sys.argv) < 2:
+        # print("Usage: python plot_hook_base_link.py <path_to_npz_file>")
+        # sys.exit(1)
 
     plot_npz_file(sys.argv[1])
