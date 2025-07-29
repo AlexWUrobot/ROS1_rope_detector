@@ -40,13 +40,27 @@ class KNN(object):
         self.hook_timer = rospy.Timer(rospy.Duration(0.1), self.process_hook_estimation)
 
         # Initialization (in __init__ or once)
+        self.est_Hook_pos_in_winch_frame = np.array([np.nan, np.nan, np.nan])
+        self.est_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
+        self.est_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
+        self.ekf_Hook_pos_in_winch_frame = np.array([np.nan, np.nan, np.nan])
+        self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
+        self.ekf_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
+        self.est_Hook_pos_in_winch_frame_ekf = np.array([np.nan, np.nan, np.nan])
+        self.Hook_pos_in_base_link_frame_to_plot = deque(maxlen=2000)
+        self.Hook_pos_in_odom_frame_to_plot = deque(maxlen=2000)
         self.est_Hook_pos_in_base_link_frame_to_plot = deque(maxlen=2000)
+        self.est_Hook_pos_in_odom_frame_to_plot = deque(maxlen=2000)
         self.ekf_Hook_pos_in_base_link_frame_to_plot = deque(maxlen=2000)
+        self.ekf_Hook_pos_in_odom_frame_to_plot = deque(maxlen=2000)
         self.est_hook_timestamps = deque(maxlen=2000)  # Store timestamps of hook detections
+        self.front_camera_sees_hook = deque(maxlen=2000)
+        self.rear_camera_sees_hook = deque(maxlen=2000)
 
         self.plot_initialized = False
         self.ekf_est_hook_map_pos_to_save = deque(maxlen=2000)  # Store EKF hook estimated pos
         self.ekf_initialized = False
+        self.last_ekf_time = None
 
         self.target_length = 2.0 # Length of the rope in meters, can be changed by winch control
         self.target_length_publish_count = 0
@@ -55,10 +69,9 @@ class KNN(object):
         # EKF setup
         self.ekf = ExtendedKalmanFilter(dim_x=6, dim_z=3)  # State: [p, v]; Measured: [r]
         self.ekf.x = np.zeros(6)
-        self.ekf.P *= 1e-2
+        self.ekf.P *= 1e-1
         self.ekf.R = np.eye(3) * 1e-2                       # Measurement noise (camera)
-        self.ekf.Q = np.eye(6) * 1e-3                       # Process noise
-        self.g_vec = np.array([0, 0, -9.81])  # Gravity vector in base_link frame
+        self.ekf.Q = np.eye(6) * 1e-1                       # Process noise
 
         # Initialize IMU values
         self.a_drone = None
@@ -84,6 +97,49 @@ class KNN(object):
         s = np.clip(s, 0, 255)
         imghsv = cv2.merge([h, s, v])
         return cv2.cvtColor(imghsv.astype("uint8"), cv2.COLOR_HSV2BGR)
+    
+    def filter_similar_lines_by_position_and_angle(self, lines, position_thresh=20, angle_thresh=5):
+        """
+        Filters out lines that are spatially close and have similar orientation.
+
+        Args:
+            lines (np.ndarray): Output from cv2.HoughLinesP, shape (N, 1, 4)
+            position_thresh (float): Maximum distance between start/end points to consider lines similar
+            angle_thresh (float): Maximum angle difference in degrees to consider lines similar
+
+        Returns:
+            List of filtered lines, each as [x1, y1, x2, y2]
+        """
+        if lines is None:
+            return []
+
+        lines = [line[0] for line in lines]  # unpack
+        accepted = []
+
+        def compute_angle(x1, y1, x2, y2):
+            return np.degrees(np.arctan2(y2 - y1, x2 - x1))
+
+        for i, line_i in enumerate(lines):
+            x1_i, y1_i, x2_i, y2_i = line_i
+            angle_i = compute_angle(x1_i, y1_i, x2_i, y2_i)
+            keep = True
+
+            for line_j in accepted:
+                x1_j, y1_j, x2_j, y2_j = line_j
+                angle_j = compute_angle(x1_j, y1_j, x2_j, y2_j)
+
+                # Distance between corresponding points
+                d_start = np.hypot(x1_i - x1_j, y1_i - y1_j)
+                d_end   = np.hypot(x2_i - x2_j, y2_i - y2_j)
+
+                if d_start < position_thresh and d_end < position_thresh and abs(angle_i - angle_j) < angle_thresh:
+                    keep = False
+                    break
+
+            if keep:
+                accepted.append(line_i)
+
+        return accepted
 
     def estimate_hook_pixel_position(self, cv_image, rear_camera=False):
         """
@@ -97,73 +153,189 @@ class KNN(object):
             tuple or None: (x, y) pixel coordinates of the hook tip, or None if not detected.
         """
 
+        # if rear_camera:
+        #     return None
+
+        result = None
+
         # Convert to HSV
-        imghsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+        cv_image_original = cv_image.copy()
+        imghsv = cv2.cvtColor(cv_image_original, cv2.COLOR_BGR2HSV)
+
+        cv2.imshow("HSV imghsv original", cv_image_original)
 
         # HSV range for hook detection (adjust as needed)
-        lower_yellow = np.array([15, 60, 20])
-        upper_yellow = np.array([70, 240, 255])
-        hsv_thresh_hook = cv2.inRange(imghsv, lower_yellow, upper_yellow)
+        lower_red = np.array([0, 180, 100])
+        upper_red = np.array([220, 255, 225])
+        hsv_thresh_hook = cv2.inRange(imghsv, lower_red, upper_red)
+
+        # cv2.imshow("HSV Threshold Hook", hsv_thresh_hook)
+
         preview_hook = cv2.bitwise_and(cv_image, cv_image, mask=hsv_thresh_hook)
 
-        cv2.imshow("hsv detector", preview_hook)
-        cv2.waitKey(1)
+        # cv2.imshow("HSV preview_hook", preview_hook)
+	# cv2.waitKey(1)
 
         # Find contours
         contours, _ = cv2.findContours(hsv_thresh_hook, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Find the longest contour (assumed to be the rope/hook)
-        max_len = 0
-        longest_contour = None
+        # Find the biggest area (assumed to be the rope/hook)
+        max_area = 0
+        biggest_area = None
+        cv_image_biggest_area = cv_image.copy()
         for cnt in contours:
-            length = cv2.arcLength(cnt, False)
-            if length > max_len:
-                max_len = length
-                longest_contour = cnt
+            area = cv2.contourArea(cnt)
+            if area > max_area:
+                max_area = area
+                biggest_area = cnt
+                
+        # if biggest_area is None:
+        #     # Draw the biggest contour in green, thickness 2
+        #     cv2.drawContours(cv_image_biggest_area, [biggest_area], -1, (0, 255, 0), 2)
+        #     # Show the result
+        #     cv2.imshow("Biggest Area Contour", cv_image_biggest_area)
 
-        if longest_contour is not None:
-            # Draw contour
-            cv2.drawContours(preview_hook, [longest_contour], -1, (0, 255, 0), 1)
+        # Convert in greyscale for contour detection
+        hsv_thresh_hook_gray = cv2.cvtColor(hsv_thresh_hook, cv2.COLOR_GRAY2BGR)
+
+        # cv2.imshow("Grey Threshold Hook", hsv_thresh_hook_gray)
+
+        # Create mask from the biggest contour
+        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        mask = np.zeros_like(gray)
+
+        if biggest_area is not None and max_area > 50:  # Ensure the area is significant
+            cv2.drawContours(mask, [biggest_area], -1, 255, thickness=cv2.FILLED)
+
+            # Edge detection on the mask
+            edges = cv2.Canny(mask, 50, 150, apertureSize=3)
+
+            # cv2.imshow("Canny Edges", edges)
+
+            # Hough Transform
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50, minLineLength=10, maxLineGap=10)
+            print(f"Detected lines: {len(lines) if lines is not None else 0}")
+            filtered_lines = self.filter_similar_lines_by_position_and_angle(lines, position_thresh=20, angle_thresh=5)
+
+            # Compute line lengths if lines are detected
+            if filtered_lines is not None:
+                line_lengths = [np.linalg.norm(np.array([x1, y1]) - np.array([x2, y2])) for x1, y1, x2, y2 in filtered_lines]
+                print(f"Line lengths: {line_lengths}")
+
+            # Draw the lines
+            cv_image_hough = cv_image.copy()
+            if filtered_lines is not None:
+                for line in filtered_lines:
+                    if line.shape == (1, 4):
+                        x1, y1, x2, y2 = line[0]
+                    elif line.shape == (4,):
+                        x1, y1, x2, y2 = line
+                    cv2.line(cv_image_hough, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Green line, thickness 2
+
+                # Show the image with lines
+                # cv2.imshow("Detected Lines", cv_image_hough)
+                self.gb_cv_image_hough = cv_image_hough.copy()
+            
+            # Get indices of the two longest lines or the longest line if less than two
+            if filtered_lines is not None and len(line_lengths) > 1:
+                longest_indices = np.argsort(line_lengths)[-2:]
+                longest_lines = [lines[i] for i in longest_indices]
+            elif lines is not None and len(line_lengths) == 1:
+                longest_lines = [lines[0]]
+            else:
+                longest_lines = []
+
+            # Calculate intersection point of the two longest lines
+            if len(longest_lines) == 2:
+                # Unpack the lines correctly
+                if longest_lines[0].shape == (1, 4):
+                    x1, y1, x2, y2 = longest_lines[0][0]
+                    x3, y3, x4, y4 = longest_lines[1][0]
+                elif longest_lines[0].shape == (4,):
+                    x1, y1, x2, y2 = longest_lines[0]
+                    x3, y3, x4, y4 = longest_lines[1]
+                else:
+                    rospy.logwarn("Unexpected line format.")
+                    return None
+
+                # All 4 endpoints
+                points_line1 = [(x1, y1), (x2, y2)]
+                points_line2 = [(x3, y3), (x4, y4)]
+
+                # Find the closest pair of points
+                min_distance = float('inf')
+                closest_pair = None
+
+                for pt1 in points_line1:
+                    for pt2 in points_line2:
+                        dist = (pt1[0] - pt2[0])**2 + (pt1[1] - pt2[1])**2
+                        if dist < min_distance:
+                            min_distance = dist
+                            closest_pair = (pt1, pt2)
+
+                # Compute midpoint between closest points
+                (xA, yA), (xB, yB) = closest_pair
+                midpoint = ((xA + xB) // 2, (yA + yB) // 2)
+
+                result = midpoint
+
+            elif len(longest_lines) == 1:
+                # If only one line is detected, return the exterme point nearest to the center of the image
+                if longest_lines[0].shape == (1, 4):
+                    x1, y1, x2, y2 = longest_lines[0][0]
+                elif longest_lines[0].shape == (4,):
+                    x1, y1, x2, y2 = longest_lines[0]
+
+                # Compute image center
+                img_h, img_w = cv_image.shape[:2]
+                center_x, center_y = img_w // 2, img_h // 2
+
+                # Compute distances from endpoints to center
+                dist1 = np.hypot(x1 - center_x, y1 - center_y)
+                dist2 = np.hypot(x2 - center_x, y2 - center_y)
+
+                # Choose the endpoint closest to the center
+                if dist1 < dist2:
+                    nearest_point = (int(x1), int(y1))
+                else:
+                    nearest_point = (int(x2), int(y2))
+
+                result = nearest_point
 
             if rear_camera:
-                vertex_1 = tuple(longest_contour[longest_contour[:, :, 0].argmin()][0])
-                vertex_2 = tuple(longest_contour[longest_contour[:, :, 1].argmin()][0])
+                top10_by_x = sorted(biggest_area, key=lambda p: p[0][0])[:10]
+                top10_by_y = sorted(top10_by_x, key=lambda p: p[0][1])[:10]
             else:
-                vertex_1 = tuple(longest_contour[longest_contour[:, :, 0].argmax()][0])
-                vertex_2 = tuple(longest_contour[longest_contour[:, :, 1].argmax()][0])
+                top10_by_x = sorted(biggest_area, key=lambda p: p[0][0], reverse=True)[:10]
+                top10_by_y = sorted(top10_by_x, key=lambda p: p[0][1], reverse=True)[:10]
+
+            vertex = tuple(top10_by_y[0][0])
+
+            if result is not None:
+                if np.linalg.norm(np.array(vertex) - np.array(result)) < 10:
+                    # If the vertex is close to the result, return it
+                    output = result
+                else:
+                    output = vertex
+            else:
+                output = vertex
 
             height, width = cv_image.shape[:2]
             edge_margin = 2
 
             # Check if on edge
             on_edge = any([
-                vertex_1[0] <= edge_margin, vertex_1[0] >= width - edge_margin,
-                vertex_1[1] <= edge_margin, vertex_1[1] >= height - edge_margin,
-                vertex_2[0] <= edge_margin, vertex_2[0] >= width - edge_margin,
-                vertex_2[1] <= edge_margin, vertex_2[1] >= height - edge_margin,
+                output[0] <= edge_margin, output[0] >= width - edge_margin,
+                output[1] <= edge_margin, output[1] >= height - edge_margin,
             ])
 
             if on_edge:
-                rospy.logwarn("Hook tip detected on image edge, skipping hook position computation.")
-                cv2.putText(preview_hook, "Hook tip on edge", (10, 80),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                self.est_Hook_pos_in_base_link_frame_to_plot.append([np.nan, np.nan, np.nan])
                 return None
-
-            # Compute hook tip position
-            tip_x = int((vertex_1[0] + vertex_2[0]) / 2)
-            tip_y = int((vertex_1[1] + vertex_2[1]) / 2)
-            tip_rope = (tip_x, tip_y)
-
-	    cv2.putText(preview_hook, "{:.2f} m".format(self.target_length), (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-
-            return tip_rope
-
+            else:
+                return output
+            
         else:
-            rospy.logwarn("No hook contour found, skipping hook position computation.")
-            cv2.putText(preview_hook, "Hook not found", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            self.est_Hook_pos_in_base_link_frame_to_plot.append([np.nan, np.nan, np.nan])
+            rospy.logwarn("No contours found for hook detection.")
             return None
 
     def update_transforms(self):
@@ -180,8 +352,8 @@ class KNN(object):
         ]
 
         # Prefix for frames (adjust as needed)
-        #full_frames = {name: f'{name}' for name in frame_list}
-	full_frames = {name: '{}'.format(name) for name in frame_list}
+        full_frames = {name: '{}'.format(name) for name in frame_list}
+
 
         now = rospy.Time.now()
 
@@ -204,22 +376,26 @@ class KNN(object):
                     rot = Rotation.from_quat([rot_quat[0], rot_quat[1], rot_quat[2], rot_quat[3]]).as_dcm()
 
                     # Save with dynamic attribute naming
-                    #pos_attr = f"{A_name}_pos_in_{B_name}_frame"
-		    pos_attr = "{}_pos_in_{}_frame".format(A_name, B_name)
-                    #rot_attr = f"{A_name}_rot_in_{B_name}_frame"
-		    rot_attr = "{}_rot_in_{}_frame".format(A_name, B_name)
+                    pos_attr = "{}_pos_in_{}_frame".format(A_name, B_name)
+                    rot_attr = "{}_rot_in_{}_frame".format(A_name, B_name)
+
                     setattr(self, pos_attr, pos)
                     setattr(self, rot_attr, rot)
 
                 except (tf.Exception, tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e:
-                    #rospy.logwarn(f"TF lookup failed for {A_frame} -> {B_frame}: {e}")
-	            rospy.logwarn("TF lookup failed for {} -> {}: {}".format(A_frame, B_frame, e))
-                    #pos_attr = f"{A_name}_pos_in_{B_name}_frame"
-		    pos_attr = "{}_pos_in_{}_frame".format(A_name, B_name)
-                    #rot_attr = f"{A_name}_rot_in_{B_name}_frame"
-		    rot_attr = "{}_rot_in_{}_frame".format(A_name, B_name)
+                    pos_attr = "{}_pos_in_{}_frame".format(A_name, B_name)
+                    rot_attr = "{}_rot_in_{}_frame".format(A_name, B_name)
+
                     setattr(self, pos_attr, None)
                     setattr(self, rot_attr, None)
+                    rospy.logwarn("TF lookup failed for {} -> {}: {}".format(A_frame, B_frame, e))
+                
+    def is_in_frame(self, pt, img_w, img_h):
+        if pt is None or not (isinstance(pt, (list, tuple, np.ndarray)) and len(pt) == 2):
+            return False
+        x, y = pt
+        return 0 <= x < img_w and 0 <= y < img_h
+
 
     def estimate_hook_position(self, tip_front_cam, tip_rear_cam):
         """
@@ -227,42 +403,45 @@ class KNN(object):
         Stores result in self.est_Hook_pos_in_winch_frame.
         """
 
+        K = np.array([
+                    [369.5, 0, 320],
+                    [0, 415.69, 240],
+                    [0, 0, 1]
+                ])
+        img_w = int(K[0, 2] * 2)
+        img_h = int(K[1, 2] * 2)
+
         hook_positions = []
 
         # === FRONT CAMERA ===
-        if tip_front_cam is not None:
+        if tip_front_cam is not None and self.is_in_frame(tip_front_cam, img_w, img_h):
+            self.front_camera_sees_hook.append(True)
             try:
                 p_img = np.array(tip_front_cam)
-                K = np.array([
-                    [369.5, 0, 320],
-                    [0, 415.69, 240],
-                    [0, 0, 1]
-                ])
-                R_front = self.camera1_link_rot_in_winch_link_frame
-                T_front = self.camera1_link_pos_in_winch_link_frame
+                R_front = self.camera_link_rot_in_winch_link_frame
+                T_front = self.camera_link_pos_in_winch_link_frame
                 pos_front = self.reconstruct_hook_position(p_img, K, R_front, T_front, self.target_length)
                 hook_positions.append(pos_front)
             except Exception as e:
-                #rospy.logwarn(f"[Front camera] Hook reconstruction failed: {e}")
-		rospy.logwarn("[Front camera] Hook reconstruction failed: {}".format(e))
+                rospy.logwarn("[Front camera] Hook reconstruction failed: {}".format(e))
+        else:
+            self.front_camera_sees_hook.append(False)
 
 
         # === REAR CAMERA ===
-        if tip_rear_cam is not None:
+        if tip_rear_cam is not None and self.is_in_frame(tip_rear_cam, img_w, img_h):
+            self.rear_camera_sees_hook.append(True)
             try:
                 p_img = np.array(tip_rear_cam)
-                K = np.array([
-                    [369.5, 0, 320],
-                    [0, 415.69, 240],
-                    [0, 0, 1]
-                ])
-                R_rear = self.camera2_link_rot_in_winch_link_frame
-                T_rear = self.camera2_link_pos_in_winch_link_frame
+                R_rear = self.camera_link_2_rot_in_winch_link_frame
+                T_rear = self.camera_link_2_pos_in_winch_link_frame
                 pos_rear = self.reconstruct_hook_position(p_img, K, R_rear, T_rear, self.target_length)
                 hook_positions.append(pos_rear)
             except Exception as e:
-                #rospy.logwarn(f"[Rear camera] Hook reconstruction failed: {e}")
-		rospy.logwarn("[Front camera] Hook reconstruction failed: {}".format(e))
+                rospy.logwarn("[Rear camera] Hook reconstruction failed: {}".format(e))
+        else:
+            self.rear_camera_sees_hook.append(False)
+
 
         # === DECIDE FINAL POSITION ===
         if len(hook_positions) == 0:
@@ -290,7 +469,7 @@ class KNN(object):
 
         if tip_rope is not None:
             # Draw the hook tip as a red filled circle
-            cv2.circle(preview_hook, tuple(map(int, tip_rope)), 10, (0, 0, 255), -1)
+            cv2.circle(preview_hook, tuple(map(int, tip_rope)), 10, (0, 255, 255), 3)
             text_pos = (int(tip_rope[0] + 10), int(tip_rope[1]))
         else:
             # Default text position if no tip detected
@@ -301,8 +480,8 @@ class KNN(object):
         isinstance(self.est_Hook_pos_in_base_link_frame, np.ndarray) and \
         self.est_Hook_pos_in_base_link_frame.shape == (3,):
             pos = self.est_Hook_pos_in_base_link_frame
-            #pos_text = f"Position (base_link): ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
-	    pos_text = "Position (base_link): ({:.2f}, {:.2f}, {:.2f})".format(pos[0], pos[1], pos[2])
+            pos_text = "Position (base_link): ({:.2f}, {:.2f}, {:.2f})".format(pos[0], pos[1], pos[2])
+
         else:
             pos_text = "Position (base_link): N/A"
 
@@ -329,20 +508,21 @@ class KNN(object):
         p_img_hom = np.array([p_img[0], p_img[1], 1.0])
 
         # Compute direction of the ray in camera coordinates
-        #ray_dir_cam = np.linalg.inv(K) @ p_img_hom
-	ray_dir_cam = np.dot(np.linalg.inv(K), p_img_hom)
+
+        ray_dir_cam = np.dot(np.linalg.inv(K), p_img_hom)
 
         # Assuming the camera is rotated to align with winch coordinates
-	ray_dir_cam = np.dot(np.array([
-	    [0, 0, 1],
-	    [0, 1, 0],
-	    [1, 0, 0]
-	]), ray_dir_cam)
+        ray_dir_cam = np.dot(np.array([
+                                        [0, 0, 1],
+                                        [0, 1, 0],
+                                        [1, 0, 0]
+                                    ]), ray_dir_cam)
+
 
 
         # Convert ray direction to winch coordinates
-        #ray_dir_world = R @ ray_dir_cam
-	ray_dir_world = np.dot(R, ray_dir_cam)
+        ray_dir_world = np.dot(R, ray_dir_cam)
+
 
 
         # Camera center in winch coordinates
@@ -394,8 +574,9 @@ class KNN(object):
 
         # Step 3: Estimate 3D hook position using one or both camera tips
         self.estimate_hook_position(tip_front, tip_rear)
+        print("Estimated hook position in winch frame:", self.est_Hook_pos_in_winch_frame)
 
-        # Step 4: Transform hook position from winch frame to base_link frame if available
+        # Step 4: Initialize EKF if needed
         if self.est_Hook_pos_in_winch_frame is not None:
 	    self.est_Hook_pos_in_winch_frame_ekf = np.dot(np.array([
 						    [0, 1, 0],
@@ -411,101 +592,114 @@ class KNN(object):
                         if pos.shape == (3,):
                             self.ekf.x[0:3] = pos.flatten()
                             self.ekf.x[3:6] = np.zeros(3)
+                            # angles = self.cartesian_to_spherical(pos)
+                            # self.ekf.x = np.array([angles[0], angles[1], 0.0, 0.0])
                             self.ekf_initialized = True
                             rospy.loginfo("EKF initialized with first hook position.")
+                            print("EKF initial value:", self.ekf.x)
                         else:
-			    rospy.logwarn("Invalid hook position shape during EKF init: {}".format(pos.shape))
+                            rospy.logwarn("Invalid hook position shape during EKF init: {}".format(pos.shape))
                     except Exception as e:
-			rospy.logwarn("EKF initialization failed: {}".format(e))
-
-                # ======= Timestamp collection (safe) =======
-                avg_stamp_sec = None
-                try:
-                    if self.front_stamp is not None and self.rear_stamp is not None:
-                        front_sec = self.front_stamp.to_sec()
-                        rear_sec = self.rear_stamp.to_sec()
-                        avg_stamp_sec = (front_sec + rear_sec) / 2.0
-                        self.est_hook_timestamps.append(avg_stamp_sec)
-                    elif self.front_stamp is not None:
-                        self.est_hook_timestamps.append(self.front_stamp.to_sec())
-                    elif self.rear_stamp is not None:
-                        self.est_hook_timestamps.append(self.rear_stamp.to_sec())
-                    else:
-                        rospy.logwarn("Front or rear stamp missing; cannot append timestamp.")
-                except Exception as e:
-		    rospy.logwarn("Timestamp computation failed: {}".format(e))
-
-                # ======= EKF Update (if enough data and valid) =======
-                if (
-                    self.ekf_initialized and
-                    self.est_Hook_pos_in_winch_frame_ekf is not None and
-                    not np.isnan(self.est_Hook_pos_in_winch_frame_ekf).any() and
-                    len(self.est_hook_timestamps) >= 2
-                ):
-                    t1 = self.est_hook_timestamps[-1]
-                    t0 = self.est_hook_timestamps[-2]
-
-                    if t1 is not None and t0 is not None:
-                        try:
-                            dt = t1 - t0
-                            if dt is None or not isinstance(dt, (float, int)):
-                                rospy.logwarn("Computed dt is None or not a number; skipping EKF update.")
-                                self.ekf_Hook_pos_in_winch_frame = np.array([np.nan, np.nan, np.nan])
-                            else:
-                                a_drone = self.a_drone_odom
-                                meas = np.array(self.est_Hook_pos_in_winch_frame_ekf, dtype=float).reshape(3, 1)
-                                self.update_ekf_constrained(meas, a_drone, dt)
-                        except Exception as e:
-			    rospy.logwarn("EKF update failed: {}".format(e))
-                            self.ekf_Hook_pos_in_winch_frame = np.array([np.nan, np.nan, np.nan])
-                    else:
-                        rospy.logwarn("Timestamps are None; skipping EKF update.")
-                else:
-                    self.ekf_Hook_pos_in_winch_frame = np.array([np.nan, np.nan, np.nan])
-
-                # winch to base_link
-                pos_winch = self.est_Hook_pos_in_winch_frame  # shape (3,)
-                rot_winch_in_base = getattr(self, "winch_link_rot_in_base_link_frame", None)
-                pos_winch_in_base = getattr(self, "winch_link_pos_in_base_link_frame", None)
-
-                if rot_winch_in_base is not None and pos_winch_in_base is not None:
-                    #self.est_Hook_pos_in_base_link_frame = rot_winch_in_base @ pos_winch + pos_winch_in_base
-		    self.est_Hook_pos_in_base_link_frame = np.dot(rot_winch_in_base, pos_winch) + pos_winch_in_base
-
-		    self.est_Hook_pos_in_base_link_frame = np.dot(np.array([
-								    [0, 1, 0],
-								    [-1, 0, 0],
-								    [0, 0, 1]
-								]), self.est_Hook_pos_in_base_link_frame)
-                    if not np.isnan(self.ekf_Hook_pos_in_winch_frame).any():
-                        #self.ekf_Hook_pos_in_base_link_frame = rot_winch_in_base @ self.ekf_Hook_pos_in_winch_frame + pos_winch_in_base
-			self.ekf_Hook_pos_in_base_link_frame = np.dot(rot_winch_in_base, self.ekf_Hook_pos_in_winch_frame) + pos_winch_in_base
-                    else:
-                        self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
-                else:
-                    self.est_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
-                    rospy.logwarn("Missing winch_link -> base_link transform for hook position.")
-
+                        rospy.logwarn("EKF initialization failed: {}".format(e))
             except Exception as e:
-		rospy.logwarn("Error transforming hook position: {}".format(e))
-                self.est_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
-                self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
+                rospy.logwarn("Error during EKF initialization: {}".format(e))
+                self.ekf_initialized = False
 
+        
+        # Step 5: EKF prediction/update
+        now = rospy.Time.now()
+
+        if self.last_ekf_time is None:
+            self.last_ekf_time = now
+            now_sec = now.secs + now.nsecs * 1e-9
+            self.est_hook_timestamps.append(now_sec)
+            dt = 0.0  # No time has passed on the first update
         else:
-            rospy.logwarn("Hook position estimation failed.")
+            dt = now.secs + now.nsecs * 1e-9 - self.last_ekf_time.secs - self.last_ekf_time.nsecs * 1e-9
+            self.last_ekf_time = now
+            self.est_hook_timestamps.append(now.secs + now.nsecs * 1e-9)
+
+        meas = (
+                np.array(self.est_Hook_pos_in_winch_frame_ekf).reshape(3, 1)
+                if self.est_Hook_pos_in_winch_frame_ekf is not None and not np.isnan(self.est_Hook_pos_in_winch_frame_ekf).any()
+                else None
+                )
+
+        try:
+            if meas is not None:
+                self.update_ekf_constrained(dt, self.a_drone_odom, meas)
+                #self.update_ekf_constrained( dt, self.a_drone_odom, meas, use_analytical=True)
+            else:
+                self.predict_ekf_constrained(dt, self.a_drone_odom)
+                #self.predict_ekf_constrained( dt, self.a_drone_odom, use_analytical=True)
+        except Exception as e:
+            rospy.logwarn("EKF prediction\update failed: {}".format(e))
+
+        print("self.ekf_Hook_pos_in_winch_frame:", self.ekf_Hook_pos_in_winch_frame)
+
+        # Step 6: Transform hook position to base_link and odom frames
+        try:
+            pos_winch = self.est_Hook_pos_in_winch_frame  # shape (3,)
+            rot_winch_in_base = getattr(self, "winch_link_rot_in_base_link_frame", None)
+            pos_winch_in_base = getattr(self, "winch_link_pos_in_base_link_frame", None)
+            rot_base_in_odom = getattr(self, "base_link_rot_in_odom_frame", None)
+            pos_base_in_odom = getattr(self, "base_link_pos_in_odom_frame", None)
+        except Exception as e:
+            rospy.logwarn("Error transforming hook position to base_link and odom: {}".format(e))
             self.est_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
+            self.est_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
+            self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
+            self.ekf_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
+
+        if self.est_Hook_pos_in_winch_frame is not None and not np.isnan(self.est_Hook_pos_in_winch_frame).any() and rot_winch_in_base is not None and pos_winch_in_base is not None:
+            self.est_Hook_pos_in_base_link_frame = rot_winch_in_base @ pos_winch + pos_winch_in_base
+            self.est_Hook_pos_in_base_link_frame = np.array([
+                                                            [0, 1, 0],
+                                                            [-1, 0, 0],
+                                                            [0, 0, 1]
+                                                        ]) @ self.est_Hook_pos_in_base_link_frame
+        else:
+            self.est_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
+
+                
+        if not np.isnan(self.ekf_Hook_pos_in_winch_frame).any() and rot_winch_in_base is not None and pos_winch_in_base is not None:
+            self.ekf_Hook_pos_in_base_link_frame = rot_winch_in_base @ self.ekf_Hook_pos_in_winch_frame + pos_winch_in_base
+        else:
             self.ekf_Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
 
+        if self.est_Hook_pos_in_base_link_frame is not None and not np.isnan(self.est_Hook_pos_in_base_link_frame).any() and rot_base_in_odom is not None and pos_base_in_odom is not None:
+            self.est_Hook_pos_in_odom_frame = rot_base_in_odom @ self.est_Hook_pos_in_base_link_frame + pos_base_in_odom
+        else:
+            self.est_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
+        
+        if not np.isnan(self.ekf_Hook_pos_in_winch_frame).any() and rot_base_in_odom is not None and pos_base_in_odom is not None:
+            self.ekf_Hook_pos_in_odom_frame = rot_base_in_odom @ self.ekf_Hook_pos_in_base_link_frame + pos_base_in_odom
+        else:
+            self.ekf_Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
+
         # Step 5: Save positions for plotting
+        if self.Hook_pos_in_base_link_frame is None:
+            self.Hook_pos_in_base_link_frame = np.array([np.nan, np.nan, np.nan])
+        if self.Hook_pos_in_odom_frame is None:
+            self.Hook_pos_in_odom_frame = np.array([np.nan, np.nan, np.nan])
+        self.Hook_pos_in_base_link_frame_to_plot.append(list(self.Hook_pos_in_base_link_frame))
+        self.Hook_pos_in_odom_frame_to_plot.append(list(self.Hook_pos_in_odom_frame))
         self.est_Hook_pos_in_base_link_frame_to_plot.append(list(self.est_Hook_pos_in_base_link_frame))
+        self.est_Hook_pos_in_odom_frame_to_plot.append(list(self.est_Hook_pos_in_odom_frame))
         self.ekf_Hook_pos_in_base_link_frame_to_plot.append(list(self.ekf_Hook_pos_in_base_link_frame))
+        self.ekf_Hook_pos_in_odom_frame_to_plot.append(list(self.ekf_Hook_pos_in_odom_frame))
 
         # Step 6: Draw hook info on images if available
         if self.cv_image_front is not None:
             self.draw_hook_info(self.cv_image_front, tip_front, 'Front Camera Hook Detection')
         if self.cv_image_rear is not None:
             self.draw_hook_info(self.cv_image_rear, tip_rear, 'Rear Camera Hook Detection')
-    #def imu_callback(self, msg: Imu):
+
+
+        if self.gb_cv_image_hough is not None:
+            self.draw_hook_info(self.gb_cv_image_hough, tip_rear, 'Hough Lines and Hook Detection')
+
+
     def imu_callback(self, msg):
         self.a_drone = np.array([
             msg.linear_acceleration.x,
@@ -517,21 +711,40 @@ class KNN(object):
         # Check if the rotation matrix exists and is valid
         rot = getattr(self, "imu_link_rot_in_base_link_frame", None)
         if rot is not None:
-            #self.a_drone_odom = rot @ self.a_drone  # matrix multiply rotation * vector
-	    self.a_drone_odom = np.dot(rot, self.a_drone)
+            self.a_drone_odom = np.dot(rot, self.a_drone)
+
         else:
             rospy.logwarn("Rotation matrix imu_link_rot_in_base_link_frame not available")
             self.a_drone_odom = None
 
+    def fx(self, x, dt, a_drone):
+        x = np.asarray(x).flatten()
+        p = x[0:3]
+        v = x[3:6]
+        a_eff = self.g_vec - a_drone
+
+        # Remove radial component of acceleration to stay on sphere
+        acc = a_eff - np.dot(a_eff, p) / (np.linalg.norm(p)**2 + 1e-6) * p
+
+        new_v = v + acc * dt
+        new_p = p + new_v * dt
+        return np.concatenate((new_p, new_v))
+
+    def jacobian_F(self, x, dt, a_drone):
+        F = np.eye(6)
+        F[0:3, 3:6] = np.eye(3) * dt
+        return F
+
+    def hx(self, x):
+        return x[0:3]
+
     def project_to_sphere(self, x, L):
-        """ Project position to sphere and velocity to tangent space. """
         p = x[0:3].flatten()
         v = x[3:6].flatten()
 
         norm_p = np.linalg.norm(p)
         if norm_p > 1e-3:
             p_proj = p / norm_p * L
-            # Project v to tangent of sphere at p_proj
             v_proj = v - (np.dot(v, p_proj) / (L ** 2)) * p_proj
         else:
             p_proj = p
@@ -540,68 +753,55 @@ class KNN(object):
         return np.concatenate((p_proj, v_proj)).flatten()
 
     def project_covariance(self, P, x, L):
-        """ Project the covariance to the tangent space at position x[0:3]. """
         p = x[0:3].flatten()
         norm_p = np.linalg.norm(p)
         if norm_p < 1e-3:
-            return P  # Avoid projection if position is near zero
+            return P
 
         p_unit = p / norm_p
-        T = np.eye(3) - np.outer(p_unit, p_unit)  # Tangent projector
+        T = np.eye(3) - np.outer(p_unit, p_unit)
 
-        # Project block-wise
         P_proj = P.copy()
         #P_proj[0:3, 0:3] = T @ P[0:3, 0:3] @ T.T
         #P_proj[0:3, 3:6] = T @ P[0:3, 3:6]
 	P_proj[0:3, 0:3] = np.dot(np.dot(T, P[0:3, 0:3]), T.T)
 	P_proj[0:3, 3:6] = np.dot(T, P[0:3, 3:6])
         P_proj[3:6, 0:3] = P_proj[0:3, 3:6].T
-        P_proj[3:6, 3:6] = P[3:6, 3:6]  # Leave velocity covariance as is
-
         return P_proj
-        
-    #"""
-    # PREVIOUS KALMAN FILTER: PROBLEM WITHY THE Z AXIS
-    def fx(self, x, dt, a_drone):
-        r = x[0:3]
-        v = x[3:6]
-        
-        r_norm = np.linalg.norm(r)
-        r_hat = r / r_norm
-        g_eff = self.g_vec - a_drone
 
-        acc = - (np.dot(v, v) + np.dot(g_eff, r_hat)) * r_hat / self.target_length
-        
-        r_new = r + v * dt
-        v_new = v + acc * dt
-        return np.hstack([r_new, v_new])
+    # -------------------------------
+    # ✅ Prediction Only
+    # -------------------------------
+    def predict_ekf(self, dt, a_drone):
+        self.ekf.F = self.jacobian_F(self.ekf.x, dt, a_drone)
+        self.ekf.x = self.fx(self.ekf.x, dt, a_drone)
+        self.ekf.P = self.ekf.F @ self.ekf.P @ self.ekf.F.T + self.ekf.Q
 
-    def F_jacobian(self, x, dt, a_drone):
-        r = x[0:3]
-        v = x[3:6]
-        r_norm = np.linalg.norm(r)
-        r_hat = r / r_norm
-        g_eff = self.g_vec - a_drone
+        self.ekf_Hook_pos_in_winch_frame = self.ekf.x[0:3].copy()
 
-        I3 = np.eye(3)
-        zeros = np.zeros((3, 3))
+    def predict_ekf_constrained(self, dt, a_drone):
+        self.predict_ekf(dt, a_drone)
+        self.ekf.x = self.project_to_sphere(self.ekf.x, self.target_length)
+        self.ekf.P = self.project_covariance(self.ekf.P, self.ekf.x, self.target_length)
 
-        d_acc_dr = (
-            - (np.outer(g_eff, r_hat) + np.dot(g_eff, r_hat) * (np.eye(3) - np.outer(r_hat, r_hat)) / r_norm)
-            - (2 * np.outer(v, v) / r_norm)
-        ) / self.target_length
+        self.ekf_Hook_pos_in_winch_frame = self.ekf.x[0:3].copy()
+        print("self.ekf_Hook_pos_in_winch_frame:", self.ekf_Hook_pos_in_winch_frame)
 
-        d_acc_dv = -2 * np.outer(r_hat, v) / self.target_length
+    # -------------------------------
+    # ✅ Predict + Update (with measurement)
+    # -------------------------------
+    def update_ekf(self, dt, a_drone, measurement):
+        self.predict_ekf(dt, a_drone)
 
-        F = np.block([
-            [zeros, I3],
-            [d_acc_dr, d_acc_dv]
-        ])
+        H = np.hstack((np.eye(3), np.zeros((3, 3))))
+        z = measurement.flatten()
+        hx = self.hx(self.ekf.x).flatten()
+        y = z - hx
+        S = H @ self.ekf.P @ H.T + self.ekf.R
+        K = self.ekf.P @ H.T @ np.linalg.inv(S)
+        self.ekf.x = self.ekf.x + K @ y
+        self.ekf.P = (np.eye(6) - K @ H) @ self.ekf.P
 
-        return np.eye(6) + F * dt
-
-    def hx(self, x):
-        return x[0:3]  # we observe position only
 
     def update_ekf_constrained(self, z_meas_pos, a_drone, dt):
         # ===== EKF PREDICTION =====
@@ -609,15 +809,14 @@ class KNN(object):
         self.ekf.x = self.fx(self.ekf.x, dt, a_drone)
         #self.ekf.P = self.ekf.F @ self.ekf.P @ self.ekf.F.T + self.ekf.Q
 	self.ekf.P = np.dot(np.dot(self.ekf.F, self.ekf.P), self.ekf.F.T) + self.ekf.Q
+        self.ekf_Hook_pos_in_winch_frame = self.ekf.x[0:3].copy()
 
 
-        # ===== PROJECT TO SPHERE (optional but recommended) =====
-        self.ekf.x = self.project_to_sphere(self.ekf.x, self.target_length)
-        self.ekf.P = self.project_covariance(self.ekf.P, self.ekf.x, self.target_length)
+    def update_ekf_constrained(self, dt, a_drone, measurement):
+        self.predict_ekf_constrained(dt, a_drone)
 
-        # ===== EKF UPDATE =====
         H = np.hstack((np.eye(3), np.zeros((3, 3))))
-        z = z_meas_pos.flatten()
+        z = measurement.flatten()
         hx = self.hx(self.ekf.x).flatten()
         y = z - hx
         
@@ -631,20 +830,18 @@ class KNN(object):
 	self.ekf.x = self.ekf.x + np.dot(K, y)
 	self.ekf.P = np.dot(np.eye(6) - np.dot(K, H), self.ekf.P)
 
-        # ===== PROJECT AGAIN (after update) =====
         self.ekf.x = self.project_to_sphere(self.ekf.x, self.target_length)
         self.ekf.P = self.project_covariance(self.ekf.P, self.ekf.x, self.target_length)
 
-        # Store the filtered position estimate
         self.ekf_Hook_pos_in_winch_frame = self.ekf.x[0:3].copy()
-    #"""
 
     def _align_arrays(self, *arrays):
         """
-        Filters and aligns arrays to have the same valid length, padding shorter arrays with NaN values.
-        Assumes each array is a list of 3D vectors or timestamps.
+        Aligns arrays (3D vectors or scalars) to the same length by padding with NaNs.
+        Handles empty arrays safely.
         """
         cleaned = []
+        is_vector = []
 
         for arr in arrays:
             valid_rows = []
@@ -654,24 +851,26 @@ class KNN(object):
                         valid_rows.append([float(x) for x in item])
                     except (ValueError, TypeError):
                         continue
-                elif isinstance(item, (int, float)):  # probably a timestamp
+                elif isinstance(item, (int, float, np.float64)):
                     valid_rows.append(float(item))
             cleaned.append(valid_rows)
+            is_vector.append(len(valid_rows) > 0 and isinstance(valid_rows[0], list))
 
         max_len = max(len(arr) for arr in cleaned)
         padded = []
-        for arr in cleaned:
-            while len(arr) < max_len:
-                arr.append([np.nan, np.nan, np.nan] if isinstance(arr[0], list) else np.nan)
-            padded.append(arr)
+
+        for arr, vec in zip(cleaned, is_vector):
+            pad_value = [np.nan, np.nan, np.nan] if vec else np.nan
+            padded_arr = arr + [pad_value] * (max_len - len(arr))
+            padded.append(padded_arr)
 
         return tuple(np.array(arr) for arr in padded)
 
     def save_plot_data(self, save_dir='plot_data'):
         os.makedirs(save_dir, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        #filename = os.path.join(save_dir, f'hook_base_link_{timestamp}.npz')
 	filename = os.path.join(save_dir, 'hook_base_link_{}.npz'.format(timestamp))
+
 
 
         try:
@@ -679,9 +878,13 @@ class KNN(object):
                 filename,
                 timestamps=np.array(self.est_hook_timestamps),
                 estimated=np.array(self.est_Hook_pos_in_base_link_frame_to_plot),
-                ekf=np.array(self.ekf_Hook_pos_in_base_link_frame_to_plot)
+                ekf=np.array(self.ekf_Hook_pos_in_base_link_frame_to_plot),
+                seen_front_f=np.array(self.front_camera_sees_hook),
+                seen_rear_f=np.array(self.rear_camera_sees_hook),
             )
-	    rospy.loginfo("Saved plot data to: {}".format(filename))
+
+            rospy.loginfo("Saved plot data to: {}".format(filename))
+
         except Exception as e:
             rospy.logerr("Failed to save plot data: {}".format(e))
 
