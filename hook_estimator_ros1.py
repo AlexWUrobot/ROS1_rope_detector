@@ -63,7 +63,7 @@ class KNN(object):
         self.ekf_initialized = False
         self.last_ekf_time = None
 
-        self.target_length = 2.0 # Length of the rope in meters, can be changed by winch control
+        self.target_length = 1.0 # Length of the rope in meters, can be changed by winch control
         self.target_length_publish_count = 0
         self.max_publish_count = 2
 
@@ -166,11 +166,11 @@ class KNN(object):
         #cv2.imshow("HSV imghsv original", cv_image_original)
 
         # HSV range for hook detection (adjust as needed)
-        lower_red = np.array([0, 180, 100])
-        upper_red = np.array([220, 255, 225])
-        hsv_thresh_hook = cv2.inRange(imghsv, lower_red, upper_red)
+        lower_yellow = np.array([15, 3, 255])
+        upper_yellow = np.array([54, 255, 255])
+        hsv_thresh_hook = cv2.inRange(imghsv, lower_yellow, upper_yellow)
 
-        # cv2.imshow("HSV Threshold Hook", hsv_thresh_hook)
+        cv2.imshow("HSV Threshold Hook", hsv_thresh_hook)
 
         preview_hook = cv2.bitwise_and(cv_image, cv_image, mask=hsv_thresh_hook)
 
@@ -248,7 +248,7 @@ class KNN(object):
             else:
                 longest_lines = []
 
-            # Calculate intersection point of the two longest lines
+            # Calculate midpoint
             if len(longest_lines) == 2:
                 # Unpack the lines correctly
                 if longest_lines[0].shape == (1, 4):
@@ -306,13 +306,13 @@ class KNN(object):
                 result = nearest_point
 
             if rear_camera:
-                top10_by_x = sorted(biggest_area, key=lambda p: p[0][0])[:10]
-                top10_by_y = sorted(top10_by_x, key=lambda p: p[0][1])[:10]
+                top10_by_y = sorted(biggest_area, key=lambda p: p[0][1])[:5]
+                top10_by_x = sorted(top10_by_y, key=lambda p: p[0][0], reverse=True)[:5]
             else:
-                top10_by_x = sorted(biggest_area, key=lambda p: p[0][0], reverse=True)[:10]
-                top10_by_y = sorted(top10_by_x, key=lambda p: p[0][1], reverse=True)[:10]
+                top10_by_y = sorted(biggest_area, key=lambda p: p[0][1])[:5]
+                top10_by_x = sorted(top10_by_y, key=lambda p: p[0][0])[:5]
 
-            vertex = tuple(top10_by_y[0][0])
+            vertex = tuple(top10_by_x[0][0])
 
             if result is not None:
                 if np.linalg.norm(np.array(vertex) - np.array(result)) < 10:
@@ -472,7 +472,7 @@ class KNN(object):
 
         if tip_rope is not None:
             # Draw the hook tip as a red filled circle
-            cv2.circle(preview_hook, tuple(map(int, tip_rope)), 10, (0, 255, 255), 3)
+            cv2.circle(preview_hook, tuple(map(int, tip_rope)), 10, (0, 0, 255), 3)
             text_pos = (int(tip_rope[0] + 10), int(tip_rope[1]))
         else:
             # Default text position if no tip detected
@@ -862,12 +862,9 @@ class KNN(object):
 
         return tuple(np.array(arr) for arr in padded)
 
-    def save_plot_data(self, save_dir='plot_data'):
-        os.makedirs(save_dir, exist_ok=True)
+    def save_plot_data(self):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-	filename = os.path.join(save_dir, 'hook_base_link_{}.npz'.format(timestamp))
-
-
+        filename = 'hook_base_link_{}.npz'.format(timestamp)  # Save in current folder
 
         try:
             np.savez(
@@ -878,11 +875,10 @@ class KNN(object):
                 seen_front_f=np.array(self.front_camera_sees_hook),
                 seen_rear_f=np.array(self.rear_camera_sees_hook),
             )
-
             rospy.loginfo("Saved plot data to: {}".format(filename))
-
         except Exception as e:
             rospy.logerr("Failed to save plot data: {}".format(e))
+
 
 def main(args=None):
     rospy.init_node('k_nearest_neighbors')
